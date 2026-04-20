@@ -1,11 +1,21 @@
 import {
+  BandwidthEntry,
+  CableTestResult,
+  CableTestResultType,
   FlowControl,
+  MirrorConfig,
+  MtuVlanConfig,
   OpCode,
   PacketHeader,
+  PoePortConfig,
+  PoePriority,
+  PoeSystem,
   PortConfig,
   PortSpeed,
   PortStatistics,
   PvidConfig,
+  QosPriority,
+  StormControlEntry,
   SwitchInfo,
   TlvEntry,
   TlvType,
@@ -264,3 +274,201 @@ export function buildSwitchInfo(tlvs: TlvEntry[]): SwitchInfo {
 export const TLV_NAMES: Record<number, string> = Object.fromEntries(
   Object.entries(TlvType).filter(([, v]) => typeof v === 'number').map(([k, v]) => [v as number, k]),
 );
+
+// ---------- port mirror (TLV 16640, 10 bytes) ----------
+
+export function parseMirrorConfig(b: Buffer): MirrorConfig {
+  if (b.length !== 10) throw new Error('mirror config must be 10 bytes');
+  const enabled = b.readUInt8(0) === 1;
+  const mirrorPort = b.readUInt8(1);
+  const ingressMask = b.readUInt32BE(2);
+  const egressMask = b.readUInt32BE(6);
+  return {
+    enabled,
+    mirrorPort,
+    ingressPorts: enabled ? bitmaskToPorts(ingressMask) : [],
+    egressPorts: enabled ? bitmaskToPorts(egressMask) : [],
+  };
+}
+
+export function serializeMirrorConfig(m: MirrorConfig): Buffer {
+  const b = Buffer.alloc(10);
+  b.writeUInt8(m.enabled ? 1 : 0, 0);
+  b.writeUInt8(m.mirrorPort, 1);
+  b.writeUInt32BE(portsToBitmask(m.ingressPorts), 2);
+  b.writeUInt32BE(portsToBitmask(m.egressPorts), 6);
+  return b;
+}
+
+// ---------- qos priority (TLV 12289, 2 bytes per entry) ----------
+
+export function parseQosPriority(b: Buffer): QosPriority {
+  if (b.length !== 2) throw new Error('qos priority must be 2 bytes');
+  return { port: b.readUInt8(0), priority: b.readUInt8(1) };
+}
+
+export function serializeQosPriority(p: QosPriority): Buffer {
+  return Buffer.from([p.port, p.priority]);
+}
+
+// ---------- bandwidth ingress/egress (TLV 12544/12545, 6 bytes) ----------
+
+export function parseBandwidthEntry(b: Buffer): BandwidthEntry {
+  if (b.length !== 6) throw new Error('bandwidth entry must be 6 bytes');
+  return {
+    port: b.readUInt8(0),
+    enabled: b.readUInt8(1) === 1,
+    rateKbps: b.readUInt32BE(2),
+  };
+}
+
+export function serializeBandwidthEntry(e: BandwidthEntry): Buffer {
+  const b = Buffer.alloc(6);
+  b.writeUInt8(e.port, 0);
+  b.writeUInt8(e.enabled ? 1 : 0, 1);
+  b.writeUInt32BE(e.enabled ? e.rateKbps : 0, 2);
+  return b;
+}
+
+// ---------- storm control (TLV 12800, 9 bytes) ----------
+//
+// Layout observed on TL-SG1024DE v7: port, status, three traffic-type flags,
+// then a 4-byte big-endian rate.
+
+export function parseStormControl(b: Buffer): StormControlEntry {
+  if (b.length !== 9) throw new Error('storm control entry must be 9 bytes');
+  return {
+    port: b.readUInt8(0),
+    enabled: b.readUInt8(1) === 1,
+    unknownUnicastEnabled: b.readUInt8(2) === 1,
+    multicastEnabled: b.readUInt8(3) === 1,
+    broadcastEnabled: b.readUInt8(4) === 1,
+    rateKbps: b.readUInt32BE(5),
+  };
+}
+
+export function serializeStormControl(e: StormControlEntry): Buffer {
+  const b = Buffer.alloc(9);
+  b.writeUInt8(e.port, 0);
+  b.writeUInt8(e.enabled ? 1 : 0, 1);
+  b.writeUInt8(e.unknownUnicastEnabled ? 1 : 0, 2);
+  b.writeUInt8(e.multicastEnabled ? 1 : 0, 3);
+  b.writeUInt8(e.broadcastEnabled ? 1 : 0, 4);
+  b.writeUInt32BE(e.enabled ? e.rateKbps : 0, 5);
+  return b;
+}
+
+// ---------- MTU VLAN (TLV 8192, 2 bytes: enabled + uplink) ----------
+
+export function parseMtuVlanConfig(b: Buffer): MtuVlanConfig {
+  if (b.length < 2) throw new Error('mtu vlan must be 2 bytes');
+  return { enabled: b.readUInt8(0) === 1, uplinkPort: b.readUInt8(1) };
+}
+
+export function serializeMtuVlanConfig(c: MtuVlanConfig): Buffer {
+  return Buffer.from([c.enabled ? 1 : 0, c.uplinkPort]);
+}
+
+// ---------- port-based VLAN entry (TLV 8449, 5 bytes: id + 4-byte port mask) ----------
+
+export function parsePortVlanEntry(b: Buffer): { vlanId: number; memberPorts: number[] } {
+  if (b.length !== 5) throw new Error('port VLAN entry must be 5 bytes');
+  return { vlanId: b.readUInt8(0), memberPorts: bitmaskToPorts(b.readUInt32BE(1)) };
+}
+
+export function serializePortVlanEntry(e: { vlanId: number; memberPorts: number[] }): Buffer {
+  const b = Buffer.alloc(5);
+  b.writeUInt8(e.vlanId, 0);
+  b.writeUInt32BE(portsToBitmask(e.memberPorts), 1);
+  return b;
+}
+
+// ---------- cable test (TLV 16896, 6 bytes: port + type + 4-byte distance) ----------
+
+const CABLE_TEST_TYPES: CableTestResultType[] = [
+  'no_cable', 'normal', 'open', 'short', 'open_short', 'cross_cable',
+];
+
+export function parseCableTestResult(b: Buffer): CableTestResult {
+  if (b.length !== 6) throw new Error('cable test result must be 6 bytes');
+  const t = b.readUInt8(1);
+  return {
+    port: b.readUInt8(0),
+    type: CABLE_TEST_TYPES[t] ?? 'no_cable',
+    distanceMeters: b.readUInt32BE(2),
+  };
+}
+
+export function serializeCableTestRequest(port: number): Buffer {
+  // The official app sends a six-byte request with port + type=normal + zero distance.
+  const b = Buffer.alloc(6);
+  b.writeUInt8(port, 0);
+  b.writeUInt8(1, 1); // NORMAL placeholder
+  return b;
+}
+
+// ---------- PoE system (TLV 13568, 10 bytes of 5 u16 counters) ----------
+
+export function parsePoeSystem(b: Buffer): PoeSystem {
+  if (b.length < 10) throw new Error('poe system must be >= 10 bytes');
+  return {
+    powerLimit: b.readUInt16BE(0),
+    powerLimitMin: b.readUInt16BE(2),
+    powerLimitMax: b.readUInt16BE(4),
+    powerConsumption: b.readUInt16BE(6),
+    powerRemain: b.readUInt16BE(8),
+  };
+}
+
+/** SET for PoE system uses a single 2-byte power limit. */
+export function serializePoeSystemLimit(limitDeciwatt: number): Buffer {
+  const b = Buffer.alloc(2);
+  b.writeUInt16BE(limitDeciwatt, 0);
+  return b;
+}
+
+// ---------- PoE per-port (TLV 13824) ----------
+
+/**
+ * GET response: 14 bytes = port + status + priority + 5× u16 counters + powerStatus byte.
+ * SET request:  5 bytes = port + status + priority + 2-byte limit.
+ */
+export function parsePoePort(b: Buffer): PoePortConfig {
+  if (b.length < 14) throw new Error('poe port must be >= 14 bytes');
+  return {
+    port: b.readUInt8(0),
+    enabled: b.readUInt8(1) === 1,
+    priority: b.readUInt8(2) as PoePriority,
+    limitDeciwatt: b.readUInt16BE(3),
+    powerDeciwatt: b.readUInt16BE(5),
+    currentMilliamp: b.readUInt16BE(7),
+    voltageDecivolt: b.readUInt16BE(9),
+    pdClassDeciwatt: b.readUInt16BE(11),
+    powerStatus: b.readUInt8(13),
+  };
+}
+
+export function serializePoePort(p: {
+  port: number;
+  enabled: boolean;
+  priority: PoePriority;
+  limitDeciwatt: number;
+}): Buffer {
+  const b = Buffer.alloc(5);
+  b.writeUInt8(p.port, 0);
+  b.writeUInt8(p.enabled ? 1 : 0, 1);
+  b.writeUInt8(p.priority, 2);
+  b.writeUInt16BE(p.limitDeciwatt, 3);
+  return b;
+}
+
+// ---------- PoE extend (TLV 14592, 2 bytes: port + enabled) ----------
+
+export function parsePoeExtend(b: Buffer): { port: number; enabled: boolean } {
+  if (b.length < 2) throw new Error('poe extend must be >= 2 bytes');
+  return { port: b.readUInt8(0), enabled: b.readUInt8(1) === 1 };
+}
+
+export function serializePoeExtend(e: { port: number; enabled: boolean }): Buffer {
+  return Buffer.from([e.port, e.enabled ? 1 : 0]);
+}

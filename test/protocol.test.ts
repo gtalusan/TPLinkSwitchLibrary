@@ -6,24 +6,43 @@ import {
   packHeader,
   packTlvs,
   PACKET_END,
+  parseBandwidthEntry,
+  parseCableTestResult,
   parseIp,
   parseMac,
+  parseMirrorConfig,
+  parseMtuVlanConfig,
+  parsePoeExtend,
+  parsePoePort,
+  parsePoeSystem,
   parsePortConfig,
+  parsePortVlanEntry,
   parsePvid,
+  parseQosPriority,
+  parseStormControl,
   parseString,
   parseVlan,
   portsToBitmask,
+  serializeBandwidthEntry,
   serializeIp,
   serializeMac,
+  serializeMirrorConfig,
+  serializeMtuVlanConfig,
+  serializePoeExtend,
+  serializePoePort,
+  serializePoeSystemLimit,
   serializePortConfig,
+  serializePortVlanEntry,
   serializePvid,
+  serializeQosPriority,
+  serializeStormControl,
   serializeString,
   serializeVlan,
   splitPacket,
   unpackHeader,
   unpackTlvs,
 } from '../src/protocol.js';
-import { FlowControl, OpCode, PortSpeed, TlvType } from '../src/types.js';
+import { FlowControl, OpCode, PoePriority, PortSpeed, TlvType } from '../src/types.js';
 
 describe('header', () => {
   it('round-trips', () => {
@@ -143,6 +162,131 @@ describe('value helpers', () => {
     expect(parsed.memberPorts).toEqual([1, 2, 3, 5]);
     expect(parsed.taggedPorts).toEqual([1]);
     expect(parsed.untaggedPorts).toEqual([2, 3, 5]);
+  });
+});
+
+describe('mirror / qos / bandwidth / storm', () => {
+  it('round-trips mirror config', () => {
+    const cfg = { enabled: true, mirrorPort: 1, ingressPorts: [2, 3, 4], egressPorts: [5] };
+    expect(parseMirrorConfig(serializeMirrorConfig(cfg))).toEqual(cfg);
+  });
+
+  it('round-trips qos priority', () => {
+    expect(parseQosPriority(serializeQosPriority({ port: 7, priority: 3 }))).toEqual({ port: 7, priority: 3 });
+  });
+
+  it('round-trips bandwidth entry', () => {
+    const e = { port: 5, enabled: true, rateKbps: 1000 };
+    expect(parseBandwidthEntry(serializeBandwidthEntry(e))).toEqual(e);
+  });
+
+  it('zeroes bandwidth rate when disabled', () => {
+    const e = { port: 2, enabled: false, rateKbps: 9999 };
+    const back = parseBandwidthEntry(serializeBandwidthEntry(e));
+    expect(back.enabled).toBe(false);
+    expect(back.rateKbps).toBe(0);
+  });
+
+  it('round-trips storm control', () => {
+    const e = {
+      port: 3,
+      enabled: true,
+      broadcastEnabled: true,
+      multicastEnabled: false,
+      unknownUnicastEnabled: true,
+      rateKbps: 500_000,
+    };
+    expect(parseStormControl(serializeStormControl(e))).toEqual(e);
+  });
+
+  it('parses 9-byte storm control rows from TL-SG1024DE v7', () => {
+    const row = parseStormControl(Buffer.from('150100000100000400', 'hex'));
+    expect(row).toEqual({
+      port: 21,
+      enabled: true,
+      unknownUnicastEnabled: false,
+      multicastEnabled: false,
+      broadcastEnabled: true,
+      rateKbps: 1024,
+    });
+  });
+});
+
+describe('mtu-vlan / port-vlan / cable test', () => {
+  it('round-trips mtu vlan', () => {
+    const c = { enabled: true, uplinkPort: 3 };
+    expect(parseMtuVlanConfig(serializeMtuVlanConfig(c))).toEqual(c);
+  });
+
+  it('round-trips port-based VLAN entry', () => {
+    const e = { vlanId: 7, memberPorts: [1, 4, 8] };
+    expect(parsePortVlanEntry(serializePortVlanEntry(e))).toEqual(e);
+  });
+
+  it('parses a cable test result', () => {
+    const b = Buffer.from([3, 2, 0, 0, 0, 15]); // port 3, OPEN at 15m
+    const r = parseCableTestResult(b);
+    expect(r.port).toBe(3);
+    expect(r.type).toBe('open');
+    expect(r.distanceMeters).toBe(15);
+  });
+});
+
+describe('poe', () => {
+  it('parses system counters', () => {
+    const b = Buffer.alloc(10);
+    b.writeUInt16BE(650, 0);   // limit 65 W
+    b.writeUInt16BE(0, 2);
+    b.writeUInt16BE(650, 4);
+    b.writeUInt16BE(123, 6);   // consumption 12.3 W
+    b.writeUInt16BE(527, 8);   // remain 52.7 W
+    const sys = parsePoeSystem(b);
+    expect(sys.powerLimit).toBe(650);
+    expect(sys.powerConsumption).toBe(123);
+    expect(sys.powerRemain).toBe(527);
+  });
+
+  it('round-trips port config set payload', () => {
+    const p = {
+      port: 2,
+      enabled: true,
+      priority: PoePriority.HIGH,
+      limitDeciwatt: 300,
+    };
+    const buf = serializePoePort(p);
+    expect(buf.length).toBe(5);
+    expect(buf.readUInt16BE(3)).toBe(300);
+  });
+
+  it('parses a full port status row', () => {
+    const b = Buffer.alloc(14);
+    b.writeUInt8(4, 0);           // port 4
+    b.writeUInt8(1, 1);           // enabled
+    b.writeUInt8(PoePriority.MIDDLE, 2);
+    b.writeUInt16BE(330, 3);      // auto limit
+    b.writeUInt16BE(42, 5);       // 4.2 W drawn
+    b.writeUInt16BE(85, 7);       // 85 mA
+    b.writeUInt16BE(490, 9);      // 49.0 V
+    b.writeUInt16BE(70, 11);      // class 2
+    b.writeUInt8(1, 13);          // power status 1
+    const row = parsePoePort(b);
+    expect(row.port).toBe(4);
+    expect(row.enabled).toBe(true);
+    expect(row.priority).toBe(PoePriority.MIDDLE);
+    expect(row.limitDeciwatt).toBe(330);
+    expect(row.pdClassDeciwatt).toBe(70);
+    expect(row.powerStatus).toBe(1);
+  });
+
+  it('round-trips extend entry', () => {
+    const e = { port: 6, enabled: true };
+    expect(parsePoeExtend(serializePoeExtend(e))).toEqual(e);
+  });
+
+  it('system-limit set payload is exactly two bytes', () => {
+    const buf = serializePoeSystemLimit(650);
+    expect(buf.length).toBe(2);
+    expect(buf.readUInt16BE(0)).toBe(650);
   });
 });
 

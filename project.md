@@ -89,27 +89,54 @@ The protocol has been fully reverse-engineered by multiple independent researche
 | 8 | hardware | string | R |
 | 9 | dhcp | bool (1 byte) | R/W |
 | 10 | num_ports | u8 | R |
+| 11 | management_vlan | u16 | R/W |
 | 12 | led_status | bool | R/W |
 | 13 | auto_save | bool | R |
 | 14 | is_factory | bool | R |
 | 15 | flash_type | hex | R |
 | 512 | username | string (null-terminated) | W (login) |
+| 513 | password_old | string (null-terminated) | W (credential change) |
 | 514 | password | string (null-terminated) | W (login) |
+| 515 | password_new | string (null-terminated) | W (credential change) |
+| 528 | rsa_key | opaque | R/W |
+| 768 | system_config_get | opaque | R |
+| 769 | system_config_set | opaque | W |
 | 773 | reboot | bool | W |
+| 1280 | system_reset | action | W |
+| 1536 | system_upgrade | opaque | W |
 | 2304 | save | action | W |
 | 2305 | get_token_id | action | R |
 | 4096 | ports | 7 bytes per port | R/W |
 | 4352 | igmp_snooping | bool | R/W |
+| 4354 | igmp_suppress | bool | R/W |
 | 4608 | trunk | 5 bytes | R/W |
 | 8192 | mtu_vlan | 2 bytes | R/W |
+| 8448 | port_vlan_enabled | bool | R/W |
+| 8449 | port_vlan_entry | `{vlan_id:u8, member_mask:u32}` | R/W |
+| 8450 | port_vlan_count | u8 | R |
 | 8704 | vlan_enabled | bool (hex) | R/W |
 | 8705 | vlan | `{vlan_id: u16, member_mask: u32, tagged_mask: u32, name: string\0}` | R/W |
 | 8706 | pvid | `{port: u8, pvid: u16}` | R/W |
 | 8707 | vlan_filler | string | R (padding, ignore) |
+| 8708 | mtu_vlan_management_enabled | bool | R/W |
+| 8709 | mtu_vlan_management_ports | u32 port mask | R/W |
+| 8710 | port_vlan_management_enabled | bool | R/W |
+| 8711 | port_vlan_management_ports | u32 port mask | R/W |
+| 8712 | vlan_8021q_management_enabled | bool | R/W |
+| 8713 | vlan_8021q_management_vlan | u16 | R/W |
 | 12288 | qos_mode | bool | R/W |
-| 12289 | qos_priority | 2 bytes | R/W |
-| 16384 | port_statistics | `{port:u8, status:u8, tx_good:u32, tx_bad:u32, rx_good:u32, rx_bad:u32}` per port — struct `!bbbiiii` (14 bytes) | R |
+| 12289 | qos_priority | `{port:u8, priority:u8}` | R/W |
+| 12544 | bandwidth_ingress | `{port:u8, enabled:u8, rate_kbps:u32}` | R/W |
+| 12545 | bandwidth_egress | `{port:u8, enabled:u8, rate_kbps:u32}` | R/W |
+| 12800 | storm_control | 9 bytes: port, enabled, 3 flags, rate u32 | R/W |
+| 13568 | poe_system | 10-byte GET counters, 2-byte SET limit | R/W |
+| 13824 | poe_port | 14-byte GET row, 5-byte SET row | R/W |
+| 14080 | poe_recovery_global | bool | R/W |
+| 14336 | poe_recovery_entry | model-dependent | R/W |
+| 14592 | poe_extend | `{port:u8, enabled:u8}` | R/W |
+| 16384 | port_statistics | `{port:u8, status:u8, pad:u8, tx_good:u32, tx_bad:u32, rx_good:u32, rx_bad:u32}` per port — struct `!bbbiiii` (19 bytes) | R |
 | 16640 | port_mirror | 10 bytes | R/W |
+| 16896 | cable_test | `{port:u8, result:u8, distance:u32}` | W/R |
 | 17152 | loop_prevention | bool | R/W |
 
 **Port Settings TLV (4096)** — 7-byte value per port:
@@ -179,7 +206,7 @@ Define all types, enums, and interfaces:
 
 ```typescript
 // Enums
-enum OpCode { DISCOVERY = 0, GET = 1, SET = 2, LOGIN = 3, RETURN = 4 }
+enum OpCode { DISCOVERY = 0, GET = 1, SET = 2, LOGIN = 3, RETURN = 4, READ5 = 5 }
 enum TlvType { TYPE = 1, HOSTNAME = 2, MAC = 3, IP_ADDR = 4, ... }
 enum PortSpeed { AUTO = 1, M10_HALF = 2, M10_FULL = 3, M100_HALF = 4, M100_FULL = 5, M1000_FULL = 6 }
 enum FlowControl { OFF = 0, ON = 1 }
@@ -243,9 +270,105 @@ interface VlanConfig {
 
 interface PvidConfig { port: number; pvid: number; }
 
-interface QosConfig { mode: boolean; priorities: Buffer; }
+interface QosPriority { port: number; priority: number; }
 
-interface MirrorConfig { raw: Buffer; }
+interface QosConfig {
+  mode: boolean;
+  priorities: QosPriority[];
+}
+
+interface MirrorConfig {
+  enabled: boolean;
+  mirrorPort: number;
+  ingressPorts: number[];
+  egressPorts: number[];
+}
+
+interface BandwidthEntry {
+  port: number;
+  enabled: boolean;
+  rateKbps: number;
+}
+
+interface BandwidthConfig {
+  ingress: BandwidthEntry[];
+  egress: BandwidthEntry[];
+}
+
+interface StormControlEntry {
+  port: number;
+  enabled: boolean;
+  broadcastEnabled: boolean;
+  multicastEnabled: boolean;
+  unknownUnicastEnabled: boolean;
+  rateKbps: number;
+}
+
+interface IpConfig {
+  dhcp: boolean;
+  ipAddress?: string;
+  subnetMask?: string;
+  gateway?: string;
+  managementVlan?: number;
+}
+
+interface MtuVlanConfig {
+  enabled: boolean;
+  uplinkPort: number;
+}
+
+interface PortVlanEntry {
+  vlanId: number;
+  memberPorts: number[];
+}
+
+interface PortVlanConfig {
+  enabled: boolean;
+  entries: PortVlanEntry[];
+  managementStatus: boolean;
+  managementPorts: number[];
+}
+
+type CableTestResultType =
+  | 'no_cable'
+  | 'normal'
+  | 'open'
+  | 'short'
+  | 'open_short'
+  | 'cross_cable';
+
+interface CableTestResult {
+  port: number;
+  type: CableTestResultType;
+  distanceMeters: number;
+}
+
+interface PoeSystem {
+  powerLimit: number;
+  powerLimitMin: number;
+  powerLimitMax: number;
+  powerConsumption: number;
+  powerRemain: number;
+}
+
+enum PoePriority { HIGH = 0, MIDDLE = 1, LOW = 2 }
+
+interface PoePortConfig {
+  port: number;
+  enabled: boolean;
+  priority: PoePriority;
+  limitDeciwatt: number;
+  powerDeciwatt: number;
+  currentMilliamp: number;
+  voltageDecivolt: number;
+  pdClassDeciwatt: number;
+  powerStatus: number;
+}
+
+interface PoeExtendEntry {
+  port: number;
+  enabled: boolean;
+}
 
 interface SwitchConfig {
   info: SwitchInfo;
@@ -297,9 +420,9 @@ Implement the RC4-variant cipher. The key is hardcoded. Encode and decode are th
 - `function packTlvs(entries: TlvEntry[]): Buffer`
 - `function unpackTlvs(buf: Buffer): TlvEntry[]`
 - `function assemblePacket(header: PacketHeader, tlvs: TlvEntry[]): Buffer` — sets `checkLength`, packs header + TLVs + PACKET_END
-- `function splitPacket(data: Buffer): { header: Buffer; payload: Buffer }` — validates length and PACKET_END
-- Value interpreters: `parseString`, `parseIp`, `parseMac`, `parseBool`, `parsePortConfig`, `parseVlan`, `parsePvid`, `parsePortStats`
-- Value serializers: `serializeString`, `serializeIp`, `serializeMac`, `serializeVlan`, `serializePvid`, `serializePortConfig`
+- `function splitPacket(data: Buffer): { header: PacketHeader; payload: Buffer }` — validates length and PACKET_END
+- Value interpreters: `parseString`, `parseIp`, `parseMac`, `parseBool`, `parsePortConfig`, `parseVlan`, `parsePvid`, `parsePortStats`, `parseMirrorConfig`, `parseQosPriority`, `parseBandwidthEntry`, `parseStormControl`, `parseMtuVlanConfig`, `parsePortVlanEntry`, `parseCableTestResult`, `parsePoeSystem`, `parsePoePort`, `parsePoeExtend`
+- Value serializers: `serializeString`, `serializeIp`, `serializeMac`, `serializeVlan`, `serializePvid`, `serializePortConfig`, `serializeMirrorConfig`, `serializeQosPriority`, `serializeBandwidthEntry`, `serializeStormControl`, `serializeMtuVlanConfig`, `serializePortVlanEntry`, `serializeCableTestRequest`, `serializePoeSystemLimit`, `serializePoePort`, `serializePoeExtend`
 - Port bitmask helpers: `portsToBitmask(ports: number[]): number` and `bitmaskToPorts(mask: number): number[]`
 
 ### Phase 2: Transport Layer (`transport.ts`)
@@ -313,8 +436,9 @@ Implement the RC4-variant cipher. The key is hardcoded. Encode and decode are th
   - `async send(packet: Buffer): Promise<void>` — sends to `255.255.255.255:29808`
   - `async receive(timeoutMs: number): Promise<Buffer>` — waits for a single response, decodes, returns raw decrypted data
   - `async receiveAll(timeoutMs: number): Promise<Buffer[]>` — collects all responses until timeout (for discovery)
+  - `async receiveAssembled(timeoutMs: number, sequenceId?: number): Promise<Buffer>` — waits for response fragments matching the request sequence ID
   - `close(): void` — closes both sockets
-  - Handles fragmented responses: if `fragmentOffset > 0`, keep reading and concatenate payloads
+  - Handles fragmented responses keyed by sequence ID
   - All send/receive automatically encode/decode via cipher
 
 ### Phase 3: Discovery (`discovery.ts`)
@@ -335,11 +459,18 @@ Implement the RC4-variant cipher. The key is hardcoded. Encode and decode are th
   - Manages its own `UdpTransport` instance
   - Maintains `sequenceId` (random start, increment per send, mod 1000)
   - Maintains `tokenId` (updated from every response header)
-  - Internal `_buildHeader(opCode)` returns a populated `PacketHeader`
-  - Internal `async _query(opCode, tlvs): Promise<{ header, tlvs }>` — assembles, encodes, sends, receives, decodes, returns parsed
-  - Internal `async _refreshToken()` — sends GET with `get_token_id` TLV
+  - Internal `buildHeader(opCode)` returns a populated `PacketHeader`
+  - Internal `async query(opCode, tlvs): Promise<{ header, tlvs }>` — assembles, encodes, sends, receives the matching sequence ID, decodes, returns parsed TLVs
+  - Internal `async refreshToken()` — sends GET with `get_token_id` TLV
   - `async login(): Promise<void>` — refreshes token, then sends LOGIN with username/password
   - `async getInfo(): Promise<SwitchInfo>` — GET with hostname TLV (switch returns all info fields)
+  - `async setHostname(hostname: string): Promise<void>`
+  - `async setIpConfig(cfg: IpConfig): Promise<void>`
+  - `async setDhcp(enabled: boolean, managementVlan?: number): Promise<void>`
+  - `async getLed(): Promise<boolean>`
+  - `async setLed(enabled: boolean): Promise<void>`
+  - `async setCredentials(newUsername: string, newPassword: string): Promise<void>`
+  - `async factoryReset(): Promise<void>`
   - `async getPorts(): Promise<PortConfig[]>` — GET with ports TLV, parse each 7-byte value
   - `async setPorts(ports: PortConfig[]): Promise<void>` — SET with port config TLVs
   - `async getPortStatistics(): Promise<PortStatistics[]>` — GET with port_statistics TLV
@@ -351,12 +482,40 @@ Implement the RC4-variant cipher. The key is hardcoded. Encode and decode are th
   - `async getPvids(): Promise<PvidConfig[]>` — GET with pvid TLV
   - `async setPvid(port: number, pvid: number): Promise<void>`
   - `async setPvids(pvids: PvidConfig[]): Promise<void>` — sets multiple PVIDs (multiple TLVs in one packet)
+  - `async getManagementVlan(): Promise<{ enabled: boolean; vlanId: number | null }>`
+  - `async setManagementVlanEnabled(enabled: boolean): Promise<void>`
+  - `async setManagementVlan(vlanId: number): Promise<void>`
+  - `async getMtuVlan(): Promise<MtuVlanConfig>`
+  - `async setMtuVlan(cfg: MtuVlanConfig): Promise<void>`
+  - `async getPortVlanConfig(): Promise<PortVlanConfig>`
+  - `async setPortVlanEnabled(enabled: boolean): Promise<void>`
+  - `async setPortVlanEntry(entry: PortVlanEntry): Promise<void>`
+  - `async deletePortVlanEntry(vlanId: number): Promise<void>`
   - `async getIgmpSnooping(): Promise<boolean>`
   - `async setIgmpSnooping(enabled: boolean): Promise<void>`
+  - `async getIgmpReportSuppress(): Promise<boolean>`
+  - `async setIgmpReportSuppress(enabled: boolean): Promise<void>`
   - `async getQos(): Promise<QosConfig>`
+  - `async setQosMode(enabled: boolean): Promise<void>`
+  - `async setQosPriorities(priorities: QosPriority[]): Promise<void>`
+  - `async getBandwidthControl(): Promise<BandwidthConfig>`
+  - `async setBandwidthIngress(entries: BandwidthEntry[]): Promise<void>`
+  - `async setBandwidthEgress(entries: BandwidthEntry[]): Promise<void>`
+  - `async getStormControl(): Promise<StormControlEntry[]>`
+  - `async setStormControl(entries: StormControlEntry[]): Promise<void>`
   - `async getMirror(): Promise<MirrorConfig>`
+  - `async setMirror(cfg: MirrorConfig): Promise<void>`
   - `async getLoopPrevention(): Promise<boolean>`
   - `async setLoopPrevention(enabled: boolean): Promise<void>`
+  - `async cableTest(port: number): Promise<CableTestResult>`
+  - `async getPoeSystem(): Promise<PoeSystem>`
+  - `async setPoeSystemLimit(limitDeciwatt: number): Promise<void>`
+  - `async getPoePorts(): Promise<PoePortConfig[]>`
+  - `async setPoePort(p: { port: number; enabled: boolean; priority: PoePriority; limitDeciwatt: number }): Promise<void>`
+  - `async getPoeExtend(): Promise<PoeExtendEntry[]>`
+  - `async setPoeExtend(entry: PoeExtendEntry): Promise<void>`
+  - `async getPoeRecoveryEnabled(): Promise<boolean>`
+  - `async setPoeRecoveryEnabled(enabled: boolean): Promise<void>`
   - `async getFullConfig(): Promise<SwitchConfig>` — queries all config categories and assembles
   - `async save(): Promise<void>` — sends save TLV to persist config to flash
   - `async reboot(): Promise<void>` — sends reboot TLV
@@ -411,6 +570,19 @@ export * from './types';
 4. Get ports returns expected number of ports
 5. Get/set VLAN round-trip
 6. Get port statistics returns data
+7. Get bandwidth ingress/egress returns rows for each port
+8. Get storm control parses 9-byte rows on TL-SG1024DE v7.0
+9. No-op writes on safe test ports round-trip without changing state
+10. Cable test returns a typed result for a disconnected test port
+
+### Live Validation Notes
+
+Validated against a TL-SG1024DE hardware v7.0 at `192.168.99.5`, firmware `1.0.0 Build 20230616 Rel.34205`.
+
+- Read-only calls passed for info, ports, VLANs, PVIDs, management VLAN, MTU VLAN, port VLAN mode, IGMP, QoS, bandwidth, storm control, mirror, loop prevention, port statistics, and full config.
+- Safe no-op writes passed on ports 2 and 24 for port config, PVID, bandwidth egress, and storm control. Bandwidth ingress accepted a no-op write in isolated testing, but rapid reconnect/write loops can still expose UDP timeouts.
+- Cable tests on disconnected ports 2 and 24 returned `open` at `1m`.
+- PoE system read correctly reports unsupported/no data on this non-PoE model.
 
 ---
 
@@ -426,6 +598,10 @@ export * from './types';
 8. **Sequence ID correlation**: Match response `sequenceId` to the request to handle stale packets.
 9. **Socket cleanup**: Always close sockets on error or when done. Use try/finally patterns.
 10. **Port must belong to at least one VLAN**: Never remove a port from all VLANs. The Ansible collection handles this by putting undefined ports into VLAN 1.
+11. **Avoid concurrent requests on one client**: The UDP transport now filters by request sequence ID, but high-level client calls should still be treated as a single in-flight request stream unless a request queue is added.
+12. **Storm-control row length varies from older notes**: TL-SG1024DE v7.0 returns 9-byte rows with a 4-byte big-endian rate; tests should use that layout.
+13. **Management IP writes can cut off access**: Changing DHCP/static IP or management VLAN affects reachability immediately. Read the current config and preserve fields unless intentionally changing them.
+14. **PoE TLVs are model-dependent**: Non-PoE switches may return no TLVs for PoE reads. Callers should handle empty arrays or unsupported errors.
 
 ---
 
@@ -448,11 +624,11 @@ This library is designed to be consumed by the `tplink-switch-ui` React/TypeScri
 
 ## Milestone Checklist
 
-- [ ] Phase 1: `cipher.ts`, `types.ts`, `protocol.ts` with unit tests passing
-- [ ] Phase 2: `transport.ts` with socket lifecycle management
-- [ ] Phase 3: `discovery.ts` working against a real switch
-- [ ] Phase 4: `client.ts` with all get/set methods
-- [ ] Phase 5: `index.ts` barrel exports, package.json, tsconfig, build working
-- [ ] All unit tests passing
-- [ ] Integration test against a real switch
+- [x] Phase 1: `cipher.ts`, `types.ts`, `protocol.ts` with unit tests passing
+- [x] Phase 2: `transport.ts` with socket lifecycle management
+- [x] Phase 3: `discovery.ts` working against a real switch
+- [x] Phase 4: `client.ts` with get/set methods for the currently mapped TLVs
+- [x] Phase 5: `index.ts` barrel exports, package.json, tsconfig, build working
+- [x] All unit tests passing
+- [x] Integration test against a real switch
 - [ ] Commit and push.
