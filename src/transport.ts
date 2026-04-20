@@ -126,10 +126,10 @@ export class UdpTransport {
   }
 
   // assembles fragmented responses keyed by sequenceId
-  async receiveAssembled(timeoutMs: number): Promise<Buffer> {
+  async receiveAssembled(timeoutMs: number, sequenceId?: number): Promise<Buffer> {
     const deadline = Date.now() + timeoutMs;
     const chunks: Buffer[] = [];
-    let expectedSeq: number | null = null;
+    let expectedSeq: number | null = sequenceId ?? null;
     while (true) {
       const remain = Math.max(0, deadline - Date.now());
       const pkt = await this.receive(remain || 1);
