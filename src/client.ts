@@ -38,6 +38,7 @@ import {
   unpackTlvs,
 } from './protocol.js';
 import { UdpTransport } from './transport.js';
+import { RSA_BIG_MODULUS, RSA_OK, RSA_SMALL_MODULUS, newSessionKey, rsaEncryptSessionKey } from './session.js';
 import {
   BandwidthConfig,
   BandwidthEntry,
@@ -58,6 +59,7 @@ import {
   PvidConfig,
   QosConfig,
   QosPriority,
+  SecurityMode,
   StormControlEntry,
   SwitchClientOptions,
   SwitchConfig,
@@ -73,6 +75,9 @@ export class SwitchClient extends EventEmitter {
   private switchMac: Buffer;
   private sequenceId = Math.floor(Math.random() * 1000);
   private tokenId = 0;
+  private sessionKey: string | null = null;
+  /** Transport security negotiated by login(). */
+  securityMode: SecurityMode = 'legacy';
 
   constructor(opts: SwitchClientOptions) {
     super();
@@ -115,14 +120,34 @@ export class SwitchClient extends EventEmitter {
     };
   }
 
-  private async query(opCode: OpCode, tlvs: TlvEntry[]): Promise<{ header: PacketHeader; tlvs: TlvEntry[] }> {
+  /** Send a request and return the raw reply. Does not throw on error codes. */
+  private async queryRaw(
+    opCode: OpCode,
+    tlvs: TlvEntry[],
+    useSession: boolean,
+  ): Promise<{ header: PacketHeader; tlvs: TlvEntry[] }> {
     const t = await this.transport_();
     const header = this.buildHeader(opCode, t.host.mac);
     const packet = assemblePacket(header, tlvs);
-    await t.send(packet);
-    let reply: Buffer;
+    await t.send(packet, useSession);
+    const reply = await t.receiveAssembled(this.opts.timeout, header.sequenceId);
+    const { header: rh, payload } = splitPacket(reply);
+    this.tokenId = rh.tokenId;
+    return { header: rh, tlvs: unpackTlvs(payload) };
+  }
+
+  private useSession(): boolean {
+    return this.securityMode !== 'legacy' && this.sessionKey !== null;
+  }
+
+  private async query(
+    opCode: OpCode,
+    tlvs: TlvEntry[],
+    useSession = this.useSession(),
+  ): Promise<{ header: PacketHeader; tlvs: TlvEntry[] }> {
+    let res: { header: PacketHeader; tlvs: TlvEntry[] };
     try {
-      reply = await t.receiveAssembled(this.opts.timeout, header.sequenceId);
+      res = await this.queryRaw(opCode, tlvs, useSession);
     } catch (err) {
       // Surface timeouts via a dedicated event (Phase 4 spec).
       if (err instanceof Error && /timed out/i.test(err.message)) {
@@ -130,14 +155,12 @@ export class SwitchClient extends EventEmitter {
       }
       throw err;
     }
-    const { header: rh, payload } = splitPacket(reply);
-    this.tokenId = rh.tokenId;
-    if (rh.errorCode !== 0) {
-      const err = new Error(`switch returned error code ${rh.errorCode}`);
+    if (res.header.errorCode !== 0) {
+      const err = new Error(`switch returned error code ${res.header.errorCode}`);
       this.emit('error', err);
       throw err;
     }
-    return { header: rh, tlvs: unpackTlvs(payload) };
+    return res;
   }
 
   private async refreshToken(): Promise<void> {
@@ -151,12 +174,49 @@ export class SwitchClient extends EventEmitter {
     ];
   }
 
+  /**
+   * Negotiate an RSA session key (TLV 528) and verify the switch adopted it.
+   * The ACK alone doesn't prove adoption — e.g. the TL-SG1024DE v7 ACKs the
+   * 1024-bit key but only activates the session for the 64-bit key — so the
+   * session is confirmed with an encrypted token GET before use.
+   */
+  private async tryRSASession(modulus: Buffer, mode: SecurityMode): Promise<boolean> {
+    const t = await this.transport_();
+    const key = newSessionKey();
+    this.sessionKey = key;
+    t.setSessionCipher(key);
+    try {
+      const rsa = rsaEncryptSessionKey(key, modulus);
+      // The handshake itself always goes out static-encrypted.
+      const res = await this.queryRaw(OpCode.LOGIN, [{ type: TlvType.RSA_KEY, value: rsa }], false);
+      if (res.header.errorCode !== RSA_OK) return false;
+      await this.queryRaw(OpCode.GET, [{ type: TlvType.GET_TOKEN_ID, value: Buffer.alloc(0) }], true);
+      await this.queryRaw(OpCode.LOGIN, this.loginTlvs(), true);
+      this.securityMode = mode;
+      return true;
+    } catch {
+      return false;
+    } finally {
+      if (this.securityMode !== mode) {
+        this.sessionKey = null;
+        t.setSessionCipher(null);
+      }
+    }
+  }
+
   async login(): Promise<void> {
-    // Matches pc-smrt: refresh token, then send LOGIN with just credentials.
-    // This establishes the session; subsequent reads use plain GET with the
-    // inherited token_id. Writes re-run refresh+LOGIN with credentials+payload.
+    // Negotiate the strongest transport the switch supports: RSA session keys
+    // (1024-bit, then 64-bit), falling back to the legacy static RC4 for old
+    // firmware. Config export (TLV 768) requires the session on 2023+ firmware.
+    await this.transport_();
+    this.sessionKey = null;
+    this.securityMode = 'legacy';
+    this.transport?.setSessionCipher(null);
+    if (await this.tryRSASession(RSA_BIG_MODULUS, 'rsa-big')) return;
+    if (await this.tryRSASession(RSA_SMALL_MODULUS, 'rsa-small')) return;
+    // Legacy static path.
     await this.refreshToken();
-    await this.query(OpCode.LOGIN, this.loginTlvs());
+    await this.query(OpCode.LOGIN, this.loginTlvs(), false);
   }
 
   private async authedSet(tlvs: TlvEntry[]): Promise<{ header: PacketHeader; tlvs: TlvEntry[] }> {
@@ -533,6 +593,25 @@ export class SwitchClient extends EventEmitter {
   }
 
   // ---------- Full config + lifecycle ----------
+
+  /**
+   * Download the official binary config backup — the same blob the Easy Smart
+   * Configuration Utility saves via "Backup Config" (TLV 768, the raw config
+   * image). Requires a successful login(); on 2023+ firmware the export only
+   * works over the RSA session transport, which login() negotiates.
+   * The reply arrives fragmented (fragmentOffset counts down to 0); fragments
+   * are reassembled by the transport and their TLV 768 chunks concatenated.
+   */
+  async backupConfig(): Promise<Buffer> {
+    await this.refreshToken();
+    const { tlvs } = await this.query(OpCode.LOGIN, [
+      ...this.loginTlvs(),
+      { type: TlvType.SYSTEM_CONFIG_GET, value: Buffer.alloc(0) },
+    ]);
+    const chunks = tlvs.filter((t) => t.type === TlvType.SYSTEM_CONFIG_GET).map((t) => t.value);
+    if (!chunks.length) throw new Error('config export: no data TLV in response');
+    return Buffer.concat(chunks);
+  }
 
   async getFullConfig(): Promise<SwitchConfig> {
     const info = await this.getInfo();

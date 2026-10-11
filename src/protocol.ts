@@ -100,6 +100,25 @@ export function splitPacket(data: Buffer): { header: PacketHeader; payload: Buff
   return { header, payload };
 }
 
+/**
+ * Concatenate the payloads of a fragmented response. `fragmentOffset` counts
+ * down to 0 on the last fragment (markpash: "number of fragments - 1"), so
+ * fragments are ordered descending. The switch sends every fragment twice
+ * (~100ms apart); duplicates are dropped by fragmentOffset.
+ */
+export function assembleFragments(packets: Buffer[]): Buffer {
+  const seen = new Set<number>();
+  const parts: Array<{ offset: number; payload: Buffer }> = [];
+  for (const pkt of packets) {
+    const { header, payload } = splitPacket(pkt);
+    if (seen.has(header.fragmentOffset)) continue;
+    seen.add(header.fragmentOffset);
+    parts.push({ offset: header.fragmentOffset, payload });
+  }
+  parts.sort((a, b) => b.offset - a.offset);
+  return Buffer.concat(parts.map((p) => p.payload));
+}
+
 // ---------- value parsers ----------
 
 export function parseString(b: Buffer): string {

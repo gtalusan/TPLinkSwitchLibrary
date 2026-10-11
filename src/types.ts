@@ -7,6 +7,9 @@ export enum OpCode {
   READ5 = 5,
 }
 
+/** Transport security negotiated at login. */
+export type SecurityMode = 'rsa-big' | 'rsa-small' | 'legacy';
+
 export enum TlvType {
   // System info
   TYPE = 1,
