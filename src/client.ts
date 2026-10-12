@@ -613,6 +613,24 @@ export class SwitchClient extends EventEmitter {
     return Buffer.concat(chunks);
   }
 
+  /**
+   * Clear the switch's RSA session state so legacy (static RC4) clients can
+   * talk to it again. After an RSA session login — especially one followed by
+   * backupConfig() — the switch ignores legacy traffic for minutes to hours;
+   * sending the session-key TLV with an empty value unlocks it immediately
+   * (the switch ACKs with 4098, same as a real handshake). Verified live on
+   * TL-SG105E and TL-SG108E. The official utility has no equivalent — it never
+   * needs one because it always speaks the session cipher itself.
+   */
+  async logout(): Promise<void> {
+    // Sent static-encrypted: the TLV 528 handshake path accepts the legacy
+    // cipher even while the switch is session-locked (new clients need in).
+    await this.queryRaw(OpCode.LOGIN, [{ type: TlvType.RSA_KEY, value: Buffer.alloc(0) }], false);
+    this.sessionKey = null;
+    this.securityMode = 'legacy';
+    this.transport?.setSessionCipher(null);
+  }
+
   async getFullConfig(): Promise<SwitchConfig> {
     const info = await this.getInfo();
     const ports = await this.getPorts();

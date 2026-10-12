@@ -73,6 +73,11 @@ negotiates it automatically (1024-bit RSA, then 64-bit, then the legacy static
 cipher for old firmware). The negotiated mode is exposed as `client.securityMode`
 (`'rsa-big' | 'rsa-small' | 'legacy'`).
 
+While an RSA session is active the switch ignores legacy (static RC4) traffic
+— which breaks legacy-only tools like the pklaus/smrt stats dumper for minutes
+to hours. `logout()` clears the session (empty TLV 528, ACKed with 4098) and
+restores legacy access immediately; call it after `backupConfig()`.
+
 ## Supported operations
 
 - Discovery and login
